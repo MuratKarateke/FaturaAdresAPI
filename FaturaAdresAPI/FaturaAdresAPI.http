@@ -1,0 +1,6 @@
+@FaturaAdresAPI_HostAddress = http://localhost:5031
+
+GET {{FaturaAdresAPI_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
