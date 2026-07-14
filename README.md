@@ -2,7 +2,7 @@
 Öne Çıkan Özellikler
 PDF İşleme: PdfPig kütüphanesi ile fatura içindeki metinlerin hatasız okunması.
 
-Akıllı Adres Ayrıştırma: Regex (Düzenli İfadeler) ile fatura metni içinden ilçe adının cımbızla çekilmesi.
+Akıllı Adres Ayrıştırma: Regex (Düzenli İfadeler) ile fatura metni içinden ilçe adının  çekilmesi.
 
 Veritabanı Entegrasyonu: Entity Framework Core kullanılarak SQL Server ile tam uyumlu veri akışı.
 
