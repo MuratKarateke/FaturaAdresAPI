@@ -1,0 +1,341 @@
+﻿<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="utf-8" />
+    <title>Admin Panel - Fatura Yükle</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+        /* Temel stil: panel düzeni, kart görünümleri ve küçük responsive ayarları */
+        :root { --bg:#f5f7fb; --card:#fff; --accent:#0b5ed7; --muted:#6b7280; --success:#198754; --danger:#dc3545; }
+        body { margin:0; font-family:Segoe UI, Roboto, Arial, sans-serif; background:var(--bg); color:#111; }
+        .wrap { max-width:1100px; margin:28px auto; display:grid; grid-template-columns: 360px 1fr; gap:20px; padding:0 16px; }
+        .card { background:var(--card); border-radius:8px; box-shadow:0 1px 4px rgba(16,24,40,0.06); padding:16px; }
+        h1 { margin:0 0 12px 0; font-size:20px; }
+        .uploader { display:flex; flex-direction:column; gap:10px; }
+        input[type=file] { padding:8px; }
+        button { background:var(--accent); color:#fff; border:none; padding:10px 12px; border-radius:6px; cursor:pointer; }
+        button.secondary { background:#6c757d; }
+        button:disabled { opacity:0.6; cursor:not-allowed; }
+        .muted { color:var(--muted); font-size:13px; }
+        .history-list { display:flex; flex-direction:column; gap:8px; max-height:65vh; overflow:auto; padding-right:4px; }
+        .history-item { border:1px solid #eef2f6; padding:10px; border-radius:6px; display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+        .meta { font-size:13px; color:var(--muted); }
+        .result-ok { color:var(--success); font-weight:600; }
+        .result-err { color:var(--danger); font-weight:600; }
+        .preview { height:80vh; border:1px solid #e6eef8; border-radius:6px; overflow:auto; padding:12px; background:#fff; }
+        .preview-embed { width:100%; height:100%; border:0; }
+        .controls { display:flex; gap:8px; flex-wrap:wrap; }
+        @media (max-width:900px) { .wrap { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <!-- Sol kart: dosya seçimi ve gönderme kontrolleri -->
+        <div class="card">
+            <h1>Fatura Yükleme</h1>
+            <div class="uploader">
+                <!-- Kullanıcı PDF seçer: input elementinin id'si JS tarafından kullanılır -->
+                <label class="muted">PDF seçin (tek dosya):</label>
+                <input id="faturaKutusu" type="file" accept=".pdf,application/pdf" />
+
+                <!-- Gönderme ve geçmiş temizleme butonları -->
+                <div class="controls">
+                    <button id="gonderButonu">Fatura Oluştur & Gönder</button>
+                    <button id="temizleGecmis" class="secondary">Geçmişi Temizle</button>
+                </div>
+
+                <!-- Durum mesajları bu alanda gösterilir (erişilebilirlik için aria-live kullanıldı) -->
+                <div id="durum" class="muted" aria-live="polite"></div>
+
+                <hr />
+                <div class="muted">Notlar:</div>
+                <ul class="muted" style="margin:6px 0 0 18px; padding:0;">
+                    <li>Yükleme sırasında buton devre dışı bırakılır.</li>
+                    <li>Sunucuya aynı origin'den istek gönderilir: POST /api/fatura/yukle</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- Sağ kart: yükleme geçmişi ve PDF önizleme -->
+        <div class="card">
+            <h1>Yükleme Geçmişi</h1>
+            <!-- Geçmiş buraya render edilir (localStorage kullanılır) -->
+            <div id="history" class="history-list" role="list"></div>
+            <hr />
+            <h2 style="margin:12px 0 8px 0;font-size:16px">Önizleme</h2>
+            <div id="preview" class="preview muted">Henüz bir PDF seçilmedi veya önizleme yok.</div>
+        </div>
+    </div>
+
+    <script>
+        /*
+         Kısa açıklama:
+         - Bu dosya, adminin PDF seçip API'ye göndermesini sağlar.
+         - Gönderme sonucu localStorage'da saklanır ve geçmişten tekrar gönderme/önizleme yapılabilir.
+         - API uç noktası: POST /api/fatura/yukle  (controller'daki IFormFile parametresi adı: "dosya")
+        */
+
+        // DOM referansları: JS içinde kullanmak için elementleri seçiyoruz.
+        const input = document.getElementById('faturaKutusu');
+        const gonderBtn = document.getElementById('gonderButonu');
+        const durum = document.getElementById('durum');
+        const historyEl = document.getElementById('history');
+        const preview = document.getElementById('preview');
+        const temizleBtn = document.getElementById('temizleGecmis');
+
+        // localStorage anahtarı: geçmiş verilerini burada saklıyoruz.
+        const STORAGE_KEY = 'faturaAdminHistory_v1';
+
+        // --- Yardımcı fonksiyonlar ---
+        // readHistory: localStorage'dan geçmiş listesini alır, JSON parse hatalarını yakalar.
+        function readHistory() {
+            try {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                return raw ? JSON.parse(raw) : [];
+            } catch { return []; }
+        }
+
+        // writeHistory: belleğe yazıp UI'ı yeniden render eder.
+        function writeHistory(list) {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+            renderHistory();
+        }
+
+        // addHistory: yeni bir giriş ekler (en üstte). Maksimum uzunluk sınırı ile basit saklama.
+        function addHistory(entry) {
+            const list = readHistory();
+            list.unshift(entry);
+            if (list.length > 200) list.pop(); // gereksiz uzunluğu sınırla
+            writeHistory(list);
+        }
+
+        // formatDate: timestamp'i yerel (tr-TR) string'e çevirir.
+        function formatDate(ts) {
+            const d = new Date(ts);
+            return d.toLocaleString('tr-TR');
+        }
+
+        // renderHistory: geçmiş listesini DOM'a yazar.
+        // - Her öğe için önizle, tekrar gönder ve detay butonları oluşturur.
+        function renderHistory() {
+            const list = readHistory();
+            historyEl.innerHTML = '';
+            if (list.length === 0) {
+                historyEl.innerHTML = '<div class="muted">Henüz yükleme yapılmadı.</div>';
+                return;
+            }
+            for (const item of list) {
+                const itemEl = document.createElement('div');
+                itemEl.className = 'history-item';
+
+                // Sol bölüm: dosya adı, tarih ve API sonucu
+                const left = document.createElement('div');
+                left.style.flex = '1';
+                left.innerHTML = `<div style="font-weight:600">${escapeHtml(item.fileName)}</div>
+                                  <div class="meta">${formatDate(item.timestamp)} • ${escapeHtml(item.sizeText || '')}</div>
+                                  <div class="meta">API cevap: <span class="${item.success ? 'result-ok' : 'result-err'}">${escapeHtml(item.statusText)}</span></div>`;
+
+                // Sağ bölüm: butonlar
+                const right = document.createElement('div');
+                right.style.display = 'flex';
+                right.style.flexDirection = 'column';
+                right.style.gap = '8px';
+
+                // Önizle: local olarak saklanan bytes ile iframe oluşturur (blob URL)
+                const btnPreview = document.createElement('button');
+                btnPreview.textContent = 'Önizle';
+                btnPreview.className = 'secondary';
+                btnPreview.onclick = () => showPreviewFromData(item);
+
+                // Tekrar Gönder: kullanıcıdan dosyayı yeniden seçmesini ister (File nesnesi saklanmadığı için)
+                const btnRetry = document.createElement('button');
+                btnRetry.textContent = 'Tekrar Gönder';
+                btnRetry.onclick = () => retryUpload(item);
+
+                // Detay: API cevabını gösterir (hızlı kontrol için alert kullanıldı)
+                const btnDetails = document.createElement('button');
+                btnDetails.textContent = 'Detay';
+                btnDetails.className = 'secondary';
+                btnDetails.onclick = () => alert('Detay:\n' + JSON.stringify(item.response || item, null, 2));
+
+                right.appendChild(btnPreview);
+                right.appendChild(btnRetry);
+                right.appendChild(btnDetails);
+
+                itemEl.appendChild(left);
+                itemEl.appendChild(right);
+                historyEl.appendChild(itemEl);
+            }
+        }
+
+        // escapeHtml: gösterilen metinleri XSS'ten korumak için kaçış yapar.
+        function escapeHtml(str) {
+            if (!str) return '';
+            return String(str).replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s]));
+        }
+
+        // bytesToSize: boyutu okunabilir hale getirir (ör: 1.23 MB)
+        function bytesToSize(bytes) {
+            if (!bytes) return '0 B';
+            const sizes = ['B','KB','MB','GB','TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(1024));
+            return (bytes / Math.pow(1024, i)).toFixed( (i===0) ? 0 : 2 ) + ' ' + sizes[i];
+        }
+
+        // --- Asıl iş: uploadFile ---
+        // - Dosya doğrulama (PDF kontrolü, boyut limiti)
+        // - FormData içinde 'dosya' alanını API'ye gönderir (controller IFormFile dosya ile eşleşir)
+        // - Cevabı okuyup geçmişe kaydeder ve durum mesajı gösterir
+        async function uploadFile(file) {
+            if (!file) {
+                alert('Lütfen bir dosya seçin.');
+                return;
+            }
+            // MIME veya uzantı kontrolü: basit güvenlik
+            if (!(file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'))) {
+                alert('Lütfen PDF dosyası seçin.');
+                return;
+            }
+            // Basit boyut limiti: 15 MB
+            if (file.size > 15 * 1024 * 1024) {
+                alert('Dosya çok büyük. Maksimum 15 MB.');
+                return;
+            }
+
+            const fd = new FormData();
+            fd.append('dosya', file); // önemli: key "dosya" olmalı (backend ile uyumlu)
+
+            // UI kilitleme: tekrar gönderilmesin
+            gonderBtn.disabled = true;
+            const prevText = gonderBtn.textContent;
+            gonderBtn.textContent = 'Yükleniyor...';
+            durum.textContent = 'Sunucuya gönderiliyor...';
+
+            // Geçmiş girdisi için başlangıç objesi
+            let entry = {
+                id: 'tmp-' + Date.now(),
+                fileName: file.name,
+                size: file.size,
+                sizeText: bytesToSize(file.size),
+                timestamp: Date.now(),
+                success: false,
+                statusText: 'Gönderiliyor',
+                response: null,
+                fileData: null // önizleme için küçük bir byte dizisi saklanır
+            };
+
+            try {
+                // Önizleme amaçlı: ilk 5MB'ı okuyup history içinde saklıyoruz (tekrar indirme için)
+                try {
+                    const slice = file.slice(0, Math.min(file.size, 5 * 1024 * 1024));
+                    const ab = await slice.arrayBuffer();
+                    entry.fileData = Array.from(new Uint8Array(ab)); // basit saklama formatı
+                } catch { /* önizleme saklama başarısız olursa atla */ }
+
+                // API çağrısı
+                const resp = await fetch('/api/fatura/yukle', {
+                    method: 'POST',
+                    body: fd
+                });
+
+                // Cevabı önce text alıyoruz, sonra JSON'a parse etmeye çalışıyoruz.
+                let text = await resp.text();
+                let parsed = null;
+                try { parsed = JSON.parse(text); } catch { parsed = null; }
+
+                if (!resp.ok) {
+                    // Hata durumunda detayları entry'ye ekle
+                    entry.success = false;
+                    entry.statusText = parsed?.message || text || resp.statusText || ('Hata ' + resp.status);
+                    entry.response = parsed || { raw: text, status: resp.status };
+                    durum.textContent = 'Sunucu hatası: ' + entry.statusText;
+                } else {
+                    // Başarılı cevap: parsed içindeki alanları kullan
+                    entry.success = true;
+                    entry.statusText = parsed?.Durum || 'Başarılı';
+                    entry.response = parsed || { raw: text };
+                    durum.textContent = 'Başarılı: ' + entry.statusText;
+                }
+            } catch (err) {
+                // Ağ veya fetch hatası
+                entry.success = false;
+                entry.statusText = err && err.message ? err.message : String(err);
+                entry.response = { error: entry.statusText };
+                durum.textContent = 'İstek sırasında hata: ' + entry.statusText;
+            } finally {
+                // Her durumda geçmişe ekle ve UI'ı eski haline getir
+                addHistory(entry);
+                renderHistory();
+                gonderBtn.disabled = false;
+                gonderBtn.textContent = prevText;
+            }
+        }
+
+        // showPreviewFromData:
+        // - Eğer geçmişte saklanan byte dizisi varsa blob oluşturup iframe ile gösterir.
+        // - Not: tamamen güvenli olmak için sadece local preview amaçlıdır.
+        function showPreviewFromData(item) {
+            if (item.fileData && item.fileData.length > 0) {
+                const u8 = new Uint8Array(item.fileData);
+                const blob = new Blob([u8], { type: 'application/pdf' });
+                const url = URL.createObjectURL(blob);
+                preview.innerHTML = `<iframe class="preview-embed" src="${url}"></iframe>`;
+            } else {
+                preview.innerHTML = `<div class="muted">Önizleme mevcut değil. Orijinal dosya hala seçili ise local olarak "Önizle" düğmesi ile görüntüleyebilirsiniz.</div>`;
+            }
+        }
+
+        // retryUpload:
+        // - Tarayıcı güvenlik kısıtları nedeniyle File nesnesini doğrudan tekrar gönderemeyiz.
+        // - Bu yüzden kullanıcıya file input'u açtırıp aynı dosyayı seçmesini istiyoruz.
+        function retryUpload(item) {
+            if (confirm('Aynı dosyayı tekrar seçip göndermek ister misiniz?') ) {
+                input.click();
+                // Seçim sonrası upload tetiklenirse, bu isimle eşleşirse otomatik başlatılacak.
+                window._pendingRetry = item.fileName;
+            }
+        }
+
+        // --- Event handler'lar ---
+        // Gönder butonuna tıklandığında seçili dosyayı uploadFile fonksiyonuna pass eder.
+        gonderBtn.addEventListener('click', () => {
+            if (!input.files || input.files.length === 0) {
+                alert('Lütfen bir PDF dosyası seçin.');
+                return;
+            }
+            uploadFile(input.files[0]);
+        });
+
+        // input change: dosya seçildiğinde preview göster ve eğer retry intent varsa otomatik yükle
+        input.addEventListener('change', (e) => {
+            const f = e.target.files && e.target.files[0];
+            if (!f) return;
+            // retry isteği varsa ve dosya adı eşleşiyorsa upload başlat
+            if (window._pendingRetry && window._pendingRetry === f.name) {
+                window._pendingRetry = null;
+                uploadFile(f);
+                return;
+            }
+            // Normal seçimde inline preview oluştur (blob URL)
+            try {
+                const url = URL.createObjectURL(f);
+                preview.innerHTML = `<iframe class="preview-embed" src="${url}"></iframe>`;
+            } catch {
+                preview.textContent = 'Önizleme oluşturulamadı.';
+            }
+        });
+
+        // Geçmiş temizleme butonu: localStorage silinir ve UI güncellenir
+        temizleBtn.addEventListener('click', () => {
+            if (confirm('Geçmiş tamamen silinsin mi?')) {
+                localStorage.removeItem(STORAGE_KEY);
+                renderHistory();
+                durum.textContent = 'Geçmiş temizlendi.';
+            }
+        });
+
+        // Sayfa açılırken geçmişi render et
+        renderHistory();
+    </script>
+</body>
+</html>
