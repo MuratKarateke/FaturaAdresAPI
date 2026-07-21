@@ -21,6 +21,8 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
+app.UseStaticFiles(); // Bu kod, projemizin HTML dosyalarýný ekranda göstermesini saðlar.
+
 app.UseHttpsRedirection();
 
 app.UseAuthorization();
